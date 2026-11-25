@@ -1,0 +1,10 @@
+# Environment used for the paper (Python 3.12.13, CUDA 12.8). Also needs ffmpeg / ffprobe on PATH.
+torch==2.11.0
+torchvision==0.26.0
+transformers==5.12.1
+tokenizers==0.22.2
+huggingface_hub==1.22.0
+safetensors==0.8.0
+numpy==2.4.4
+scikit-learn==1.9.1
+pillow==11.3.0
