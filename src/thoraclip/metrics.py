@@ -72,14 +72,18 @@ def step_metrics(y, scores, videos, trained, step_ids):
 
 
 def routed_step_metrics(y, step_sims, phase_pred, true_phase, step_parent, videos, trained, step_ids):
-    """1+N readout: the routing phase's children keep their similarity, all other steps score 0;
-    routed by the predicted phase (reported) and by the true phase (upper bound)."""
+    """1+N readout: the routing phase's children keep their similarity; every other step is placed below all legal scores
+    (similarities can be negative, so a score of 0 would let an excluded step win Top-1 or outrank legal clips in a step's AP).
+    Routed by the predicted phase (reported) and by the true phase (upper bound)."""
     out = {}
     for name, phases in (('predicted_phase', np.asarray(phase_pred)), ('gold_phase', np.asarray(true_phase))):
-        scores = step_sims * (step_parent[None] == phases[:, None])
+        legal = step_parent[None] == phases[:, None]
+        floor = (step_sims[legal].min() if legal.any() else 0.) - 1.
+        scores = np.where(legal, step_sims, floor)
         m = step_metrics(y, scores, videos, trained, step_ids)
         top = scores.argmax(1)
-        m['top1_step_in_gold_steps'] = float(np.mean(y[np.arange(len(top)), top] == 1))
+        hit = (y[np.arange(len(top)), top] == 1) & legal.any(1)  # a clip whose phase has no steps has no Top-1
+        m['top1_step_in_gold_steps'] = float(np.mean(hit))
         out[name] = m
     return out
 

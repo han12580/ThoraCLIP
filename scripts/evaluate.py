@@ -112,8 +112,10 @@ def lung(args, model):
     # retrieval on the weak test clips: gallery = each clip's caption (first text)
     texts = [r.get('caption') or r.get('description') for r in test]
     t_emb = model.embed_text(texts)
-    rows = [dict(source_id='lung:' + r['video_id'], clip_uid=r['clip_id'], decode_start_s=0., decode_end_s=float(r['duration_s']),
-                 alignment_text=x) for r, x in zip(test, texts)]
+    # spans on the SOURCE-video timeline, so only clips of the same video that really overlap by > 50% are not negatives
+    # (clip-relative spans starting at 0 made every pair of clips from one video look overlapping)
+    rows = [dict(source_id='lung:' + r['video_id'], clip_uid=r['clip_id'], decode_start_s=float(r['start_s']),
+                 decode_end_s=float(r['start_s']) + float(r['duration_s']), alignment_text=x) for r, x in zip(test, texts)]
     positive, allowed = M.alignment_masks(rows, rows)
     scores = (e_weak @ t_emb.T).float().cpu()
     retrieval = dict(v2t=M.retrieval_direction(scores, positive, allowed), t2v=M.retrieval_direction(scores.T, positive.T, allowed.T))
