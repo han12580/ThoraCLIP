@@ -37,34 +37,46 @@ def video_bootstrap(y, p, videos, classes=PHASE_CLASSES, rounds=2000, seed=0):
 
 
 # ---------------------------------------------------------------- steps
-def mean_ap(y, scores, classes):
+def mean_ap(y, scores, classes, legal=None):
+    """legal (rows x steps, optional): routing. A blocked row is never retrieved for that step: AP is computed over the
+    routed rows and scaled by routed positives / all positives, i.e. blocked positives count in the recall denominator
+    but are never found (same as the F1 / Top-1 view). Without legal, plain AP over all rows."""
     from sklearn.metrics import average_precision_score
     present = [c for c in classes if y[:, c].sum() > 0]
     if not present:
         return float('nan'), present
-    return float(np.mean([average_precision_score(y[:, c], scores[:, c]) for c in present])), present
+
+    def ap(c):
+        if legal is None:
+            return average_precision_score(y[:, c], scores[:, c])
+        rows = legal[:, c]
+        found = y[rows, c].sum()
+        return 0. if found == 0 else average_precision_score(y[rows, c], scores[rows, c]) * found / y[:, c].sum()
+    return float(np.mean([ap(c) for c in present])), present
 
 
-def map_bootstrap(y, scores, videos, classes, rounds=2000, seed=0):
+def map_bootstrap(y, scores, videos, classes, rounds=2000, seed=0, legal=None):
     rng = np.random.default_rng(seed)
     unique = np.unique(videos)
     index = {v: np.flatnonzero(videos == v) for v in unique}
     values = []
     for _ in range(rounds):
         take = np.concatenate([index[v] for v in rng.choice(unique, len(unique))])
-        values.append(mean_ap(y[take], scores[take], classes)[0])
+        values.append(mean_ap(y[take], scores[take], classes, None if legal is None else legal[take])[0])
     return np.nanpercentile(values, [2.5, 97.5]).tolist()
 
 
-def step_metrics(y, scores, videos, trained, step_ids):
-    """mAP over trainable steps present in y; 'frequent' = steps with >= 5 positives (CI only for those)."""
+def step_metrics(y, scores, videos, trained, step_ids, legal=None):
+    """mAP over trainable steps present in y; 'frequent' = steps with >= 5 positives (CI only for those).
+    legal: routing mask (rows x steps); blocked positives are never retrieved (see mean_ap)."""
     from sklearn.metrics import f1_score
     gold_classes = [c for c in trained if y[:, c].sum() > 0]
-    ap, present = mean_ap(y, scores, gold_classes)
+    ap, present = mean_ap(y, scores, gold_classes, legal)
     frequent = [c for c in gold_classes if y[:, c].sum() >= MIN_GOLD_POSITIVES]
     predicted = (scores >= .5).astype(int)
     return dict(mAP=ap, steps_in_mAP=[step_ids[c] for c in present],
-                mAP_frequent=mean_ap(y, scores, frequent)[0], mAP_frequent_95ci=map_bootstrap(y, scores, videos, frequent),
+                mAP_frequent=mean_ap(y, scores, frequent, legal)[0],
+                mAP_frequent_95ci=map_bootstrap(y, scores, videos, frequent, legal=legal),
                 macro_f1_at_0_5_frequent=float(f1_score(y[:, frequent], predicted[:, frequent], average='macro', zero_division=0))
                 if frequent else float('nan'),
                 frequent_steps=[step_ids[c] for c in frequent],
@@ -73,14 +85,15 @@ def step_metrics(y, scores, videos, trained, step_ids):
 
 def routed_step_metrics(y, step_sims, phase_pred, true_phase, step_parent, videos, trained, step_ids):
     """1+N readout: the routing phase's children keep their similarity; every other step is placed below all legal scores
-    (similarities can be negative, so a score of 0 would let an excluded step win Top-1 or outrank legal clips in a step's AP).
+    (similarities can be negative, so a score of 0 would let an excluded step win Top-1); in a step's AP a blocked clip is
+    never retrieved: blocked positives stay in the recall denominator (the same view as Top-1 / F1).
     Routed by the predicted phase (reported) and by the true phase (upper bound)."""
     out = {}
     for name, phases in (('predicted_phase', np.asarray(phase_pred)), ('gold_phase', np.asarray(true_phase))):
         legal = step_parent[None] == phases[:, None]
         floor = (step_sims[legal].min() if legal.any() else 0.) - 1.
         scores = np.where(legal, step_sims, floor)
-        m = step_metrics(y, scores, videos, trained, step_ids)
+        m = step_metrics(y, scores, videos, trained, step_ids, legal=legal)
         top = scores.argmax(1)
         hit = (y[np.arange(len(top)), top] == 1) & legal.any(1)  # a clip whose phase has no steps has no Top-1
         m['top1_step_in_gold_steps'] = float(np.mean(hit))
@@ -144,6 +157,8 @@ def retrieval_direction(scores, positive, allowed):
         for k in sums:
             sums[k] += hit_probability(size, matches, k - above)
         valid += 1
+    if not valid:  # no query has a true negative: report it instead of dividing by zero
+        return dict(queries=0, excluded=len(scores), R1=None, R5=None, R10=None)
     return dict(queries=valid, excluded=len(scores) - valid, **{f'R{k}': v / valid for k, v in sums.items()})
 
 
