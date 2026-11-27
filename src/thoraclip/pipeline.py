@@ -34,6 +34,19 @@ def windows(n, center, width):
     return max(0, b - width), b
 
 
+def load_text_trainable(text, state):
+    """Load text_trainable.safetensors into the text tower. The file holds only the trained part (projection, plus the LoRA
+    factors of the 8B model); the backbone comes from its own checkpoint. Every trained key must be present and nothing else,
+    so an incomplete export fails here instead of running with a randomly initialised projection or zero LoRA."""
+    result = text.load_state_dict(state, strict=False)
+    if result.unexpected_keys:
+        raise ValueError(f'unexpected text weights: {result.unexpected_keys[:5]}')
+    trained = [k for k in text.state_dict() if k.startswith('projection.') or '.lora_' in k]
+    missing = [k for k in trained if k not in state]
+    if missing:
+        raise ValueError(f'text_trainable.safetensors lacks {len(missing)} trained weights: {missing[:5]}')
+
+
 class Pipeline:
     def __init__(self, folder, device='cuda', text_path=None, load_vision=True):
         from safetensors.torch import load_file
@@ -51,9 +64,7 @@ class Pipeline:
         if t.get('lora_rank'):
             self.text.backbone.to(torch.bfloat16)
             add_lora(self.text.backbone, int(t['lora_rank']), float(t['lora_alpha']))
-        missing = self.text.load_state_dict(load_file(self.folder / 'text_trainable.safetensors'), strict=False)
-        if missing.unexpected_keys:
-            raise ValueError(f'unexpected text weights: {missing.unexpected_keys[:5]}')
+        load_text_trainable(self.text, load_file(self.folder / 'text_trainable.safetensors'))
         self.text = self.text.to(device).eval()
         m = cfg['tower']
         self.tower = VideoTower(use_grid=m['use_grid'], layers=m['layers'], pool=m['pool']).to(device).eval()
@@ -171,9 +182,11 @@ class Pipeline:
         return emb @ self.queries[f'phase_{queries}'].T
 
     def step_scores(self, emb, phase_pred, queries='prototype'):
-        """Similarity to every step, kept only for the children of the given phase (others 0), as in the paper's readout."""
+        """Similarity to every step; steps that are not children of the given phase are -inf, so they never rank above a
+        child (similarities can be negative, so 0 would). For the paper's step mAP use metrics.routed_step_metrics, where a
+        clip routed away from a step is never retrieved for it."""
         s = (emb @ self.queries[f'step_{queries}'].T).cpu().numpy()
-        return s * (self.step_parent[None] == np.asarray(phase_pred)[:, None])
+        return np.where(self.step_parent[None] == np.asarray(phase_pred)[:, None], s, -np.inf)
 
     def classify(self, video, start=0., end=None, queries='prototype', top_steps=3):
         """Phase and steps of one clip ([start, end) seconds of a video file)."""
