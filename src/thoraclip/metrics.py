@@ -87,7 +87,8 @@ def routed_step_metrics(y, step_sims, phase_pred, true_phase, step_parent, video
     """1+N readout: the routing phase's children keep their similarity; every other step is placed below all legal scores
     (similarities can be negative, so a score of 0 would let an excluded step win Top-1); in a step's AP a blocked clip is
     never retrieved: blocked positives stay in the recall denominator (the same view as Top-1 / F1).
-    Routed by the predicted phase (reported) and by the true phase (upper bound)."""
+    Routed by the predicted phase (reported) and by the true phase (oracle-phase reference, not an upper bound: predicted
+    routing can also block high-scoring false positives, so its AP may exceed the oracle-phase AP)."""
     out = {}
     for name, phases in (('predicted_phase', np.asarray(phase_pred)), ('gold_phase', np.asarray(true_phase))):
         legal = step_parent[None] == phases[:, None]

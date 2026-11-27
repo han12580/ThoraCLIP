@@ -126,7 +126,9 @@ def lung(args, model):
                    gold_step_mAP_frequent=result['prototype']['gold']['steps']['predicted_phase']['mAP_frequent'],
                    definition_gold_phase_f1=result['definition']['gold']['phase']['macro_f1'],
                    test_phase_f1=result['prototype']['weak_test']['phase']['macro_f1'],
-                   **{f'test_{d}_R{k}': 100 * retrieval[d][f'R{k}'] for d in ('v2t', 't2v') for k in (1, 5, 10)})
+                   # None (no query with a true negative) stays None -> JSON null, never 0
+                   **{f'test_{d}_R{k}': None if retrieval[d][f'R{k}'] is None else 100 * retrieval[d][f'R{k}']
+                      for d in ('v2t', 't2v') for k in (1, 5, 10)})
     return dict(summary=summary, queries=result, retrieval=retrieval, gold_segments_scored=len(gold), test_clips=len(test))
 
 
