@@ -53,10 +53,25 @@ def eligible(rows):
     return [r for r in rows if r.get('phase_training_eligible') and r.get('phase_target') is not None and has_text(r)]
 
 
+# Labels are mapped by class ID into the model's own order (config.json phase_ids / step_ids), never taken from the integer
+# phase_target / step_targets of the prepared rows: those follow the dataset's taxonomy.json, and a different taxonomy order
+# would still score, just against the wrong columns.
+def phase_label(model, phase_id):
+    if phase_id not in model.phase_ids:
+        raise ValueError(f'phase {phase_id} is not in the model classes')
+    return model.phase_ids.index(phase_id)
+
+
+def step_labels(model, step_ids):
+    unknown = set(step_ids) - set(model.step_ids)
+    if unknown:
+        raise ValueError(f'steps {sorted(unknown)} are not in the model classes')
+    return [int(s in step_ids) for s in model.step_ids]
+
+
 # ================================================================= lung clip level
 def lung(args, model):
     data = args.data
-    steps_index = {s: i for i, s in enumerate(model.step_ids)}
     trained = model.cfg['trained_steps']
     test = eligible(jsonl(data / 'in_scope/test.jsonl'))
     gold_rows = jsonl(data / 'gold/gold_segments.jsonl')
@@ -80,8 +95,8 @@ def lung(args, model):
         return torch.cat(out)
 
     # items: weak test clips (whole) and gold segments (whole clip or the doctor's sub-range, cut from the clip's seconds)
-    weak = [dict(clip_id=r['clip_id'], whole=True, video_id=r['video_id'], phase=int(r['phase_target']),
-                 steps=r['step_targets'] if r.get('step_training_eligible') else None) for r in test]
+    weak = [dict(clip_id=r['clip_id'], whole=True, video_id=r['video_id'], phase=phase_label(model, r['phase_id']),
+                 steps=step_labels(model, r['step_ids']) if r.get('step_training_eligible') else None) for r in test]
     gold = []
     for s in gold_rows:
         r = by_clip.get(s['clip_id'])
@@ -92,8 +107,8 @@ def lung(args, model):
         whole = abs(s['start_s'] - r['start_s']) < 1e-3 and abs(s['end_s'] - r['end_s']) < 1e-3
         start = 0. if whole else s['start_s'] - r['start_s']
         gold.append(dict(clip_id=r['clip_id'], whole=whole, start=start, end=start + (r['duration_s'] if whole else s['end_s'] - s['start_s']),
-                         video_id=s['video_id'], segment_id=s['segment_id'], phase=model.phase_ids.index(s['phase_id']),
-                         steps=[int(c in {steps_index[x] for x in s['step_ids']}) for c in range(len(model.step_ids))]))
+                         video_id=s['video_id'], segment_id=s['segment_id'], phase=phase_label(model, s['phase_id']),
+                         steps=step_labels(model, s['step_ids'])))
 
     def zero_shot(items, emb, q):
         pred = model.phase_scores(emb, q).argmax(1).cpu().numpy()
@@ -145,11 +160,11 @@ def second_labels(intervals, n):
     return lab
 
 
-def split_videos(data, split):
+def split_videos(data, split, model):
     rows = {r['clip_id']: r for r in eligible(jsonl(data / f'in_scope/{split}.jsonl'))}
     out = []
     for v in jsonl(data / 'videos.jsonl'):
-        ivs = [(float(i['start_s']), float(i['end_s']), int(rows[i['clip_id']]['phase_target'])) for i in v['intervals'] if i['clip_id'] in rows]
+        ivs = [(float(i['start_s']), float(i['end_s']), phase_label(model, rows[i['clip_id']]['phase_id'])) for i in v['intervals'] if i['clip_id'] in rows]
         if ivs:
             out.append(dict(video_id=v['video_id'], path=data / v['video'], intervals=ivs))
     return out
@@ -158,7 +173,7 @@ def split_videos(data, split):
 def fullvideo(args, model):
     def run(split):
         out = []
-        for k, v in enumerate(split_videos(args.data, split)[:args.limit_videos or None]):
+        for k, v in enumerate(split_videos(args.data, split, model)[:args.limit_videos or None]):
             feats = model.video_features(v['path'])
             s = model.phase_scores(model.embed_windows(feats, args.window), args.query).cpu().numpy()
             out.append(dict(video=v['video_id'], scores=s, labels=second_labels(v['intervals'], len(s))))
